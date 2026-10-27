@@ -7,6 +7,14 @@ release will remove the deprecated code.
 
 ## Gazebo Sim 8.15.X to 8.16.X
 
+* **Physics**
+  * The `LinearVelocityCmd` and `AngularVelocityCmd` components of models and
+    links are now removed after each time step, whereas previously their
+    values were set to zero. A zeroed command kept overwriting the velocity of
+    the entity at every following step. Systems that want a persistent
+    velocity have to set the command again at each step. `JointVelocityCmd`
+    is unchanged.
+
 * **Buoyancy**
   * The graded buoyancy mode now accounts for the orientation of each
     collision when slicing it against a fluid interface. Previously the

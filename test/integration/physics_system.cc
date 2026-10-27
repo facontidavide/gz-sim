@@ -18,6 +18,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -51,6 +52,7 @@
 
 #include "gz/sim/components/AngularAcceleration.hh"
 #include "gz/sim/components/AngularVelocity.hh"
+#include "gz/sim/components/AngularVelocityCmd.hh"
 #include "gz/sim/components/AxisAlignedBox.hh"
 #include "gz/sim/components/CanonicalLink.hh"
 #include "gz/sim/components/Collision.hh"
@@ -71,6 +73,7 @@
 #include "gz/sim/components/Link.hh"
 #include "gz/sim/components/LinearAcceleration.hh"
 #include "gz/sim/components/LinearVelocity.hh"
+#include "gz/sim/components/LinearVelocityCmd.hh"
 #include "gz/sim/components/Material.hh"
 #include "gz/sim/components/Model.hh"
 #include "gz/sim/components/Name.hh"
@@ -3092,6 +3095,107 @@ TEST_F(PhysicsSystemFixture,
   // Acceleration should be around -9.8 again
   EXPECT_NEAR(a5, -9.8, 1e-2);
   EXPECT_NEAR(a6, -9.8, 1e-2);
+}
+
+/////////////////////////////////////////////////
+// Set a velocity command once on a model or a link in free fall. The command
+// must be applied for one step and then removed, so the body keeps the
+// commanded velocity (nothing slows it down in the air) instead of being held
+// at zero velocity by a command that was zeroed rather than removed.
+void CheckVelocityCmdAppliedOnce(bool _onLink)
+{
+  ServerConfig serverConfig;
+
+  const auto sdfFile = std::string(PROJECT_SOURCE_PATH) +
+    "/test/worlds/falling.sdf";
+  serverConfig.SetSdfFile(sdfFile);
+
+  Server server(serverConfig);
+  server.SetUpdatePeriod(0ns);
+
+  const math::Vector3d linearVel(1.0, 0.0, 0.0);
+  const math::Vector3d angularVel(0.0, 0.0, 1.0);
+
+  Entity modelEntity{kNullEntity};
+  Entity linkEntity{kNullEntity};
+  bool cmdsSet{false};
+  std::size_t iterations{0};
+  std::size_t stepsWithLeftoverCmd{0};
+  math::Pose3d lastPose;
+  std::chrono::steady_clock::duration lastSimTime{0};
+
+  test::Relay testSystem;
+  testSystem.OnPreUpdate([&](const UpdateInfo &,
+                             EntityComponentManager &_ecm)
+      {
+        if (cmdsSet)
+          return;
+
+        modelEntity = _ecm.EntityByComponents(
+            components::Model(), components::Name("sphere"));
+        linkEntity = _ecm.EntityByComponents(
+            components::Link(), components::Name("sphere_link"));
+        ASSERT_NE(kNullEntity, modelEntity);
+        ASSERT_NE(kNullEntity, linkEntity);
+
+        const Entity target = _onLink ? linkEntity : modelEntity;
+        _ecm.SetComponentData<components::LinearVelocityCmd>(
+            target, linearVel);
+        _ecm.SetComponentData<components::AngularVelocityCmd>(
+            target, angularVel);
+        cmdsSet = true;
+      });
+  testSystem.OnPostUpdate([&](const UpdateInfo &_info,
+                              const EntityComponentManager &_ecm)
+      {
+        if (!cmdsSet || _info.paused)
+          return;
+
+        ++iterations;
+        // The physics system consumes the commands in the same iteration
+        // they were set, so none of them can still exist at this point.
+        const Entity target = _onLink ? linkEntity : modelEntity;
+        if (_ecm.Component<components::LinearVelocityCmd>(target) ||
+            _ecm.Component<components::AngularVelocityCmd>(target))
+        {
+          ++stepsWithLeftoverCmd;
+        }
+        lastPose = _ecm.Component<components::Pose>(modelEntity)->Data();
+        lastSimTime = _info.simTime;
+      });
+  server.AddSystem(testSystem.systemPtr);
+
+  // The sphere starts 7 m above the ground plane, so it stays in the air for
+  // more than a second of simulation time.
+  const std::size_t kIterations{200};
+  server.Run(true, kIterations, false);
+
+  ASSERT_TRUE(cmdsSet);
+  EXPECT_EQ(kIterations, iterations);
+  EXPECT_EQ(0u, stepsWithLeftoverCmd);
+
+  // The model has kept moving at the commanded linear velocity.
+  const double elapsed = std::chrono::duration<double>(lastSimTime).count();
+  EXPECT_GT(elapsed, 0.1);
+  EXPECT_NEAR(linearVel.X() * elapsed, lastPose.Pos().X(), 0.02);
+  EXPECT_NEAR(0.0, lastPose.Pos().Y(), 1e-3);
+
+  // The model has kept turning at the commanded angular velocity.
+  EXPECT_NEAR(angularVel.Z() * elapsed, lastPose.Rot().Yaw(), 0.02);
+}
+
+/////////////////////////////////////////////////
+TEST_F(PhysicsSystemFixture,
+       GZ_UTILS_TEST_DISABLED_ON_WIN32(ModelVelocityCmdAppliedOnce))
+{
+  CheckVelocityCmdAppliedOnce(false);
+}
+
+/////////////////////////////////////////////////
+TEST_F(PhysicsSystemFixture,
+       GZ_UTILS_TEST_DISABLED_ON_WIN32(LinkVelocityCmdAppliedOnce))
+{
+  CheckVelocityCmdAppliedOnce(true);
 }
 
 /////////////////////////////////////////////////
